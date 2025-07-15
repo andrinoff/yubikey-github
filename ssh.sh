@@ -47,36 +47,39 @@ detect_os() {
     success "Detected OS: $OS"
 }
 
-# 2. Check Dependencies
-check_dependencies() {
-    info "Checking for required dependencies..."
-    if ! command -v ssh-keygen &> /dev/null; then
-        fail "OpenSSH client (ssh-keygen) not found. Please install it and re-run."
-    else
-        success "OpenSSH client is installed."
-    fi
-
-    # Check for YubiKey Manager CLI (ykman) to guide PIN setup
-    if ! command -v ykman &> /dev/null; then
-        warn "YubiKey Manager (ykman) not found. Will provide manual instructions for PIN."
-        YKMAN_INSTALLED=false
-    else
-        success "YubiKey Manager (ykman) is installed."
-        YKMAN_INSTALLED=true
-    fi
+# 2. Install Dependencies
+install_dependencies() {
+    info "Checking and installing dependencies..."
+    case $OS in
+        'macOS')
+            if ! command -v brew &> /dev/null; then
+                fail "Homebrew is not installed. Please install Homebrew (https://brew.sh) and re-run."
+            fi
+            info "Installing openssh and ykman via Homebrew..."
+            brew install openssh ykman
+            success "Dependencies installed."
+            ;;
+        'Linux')
+            if ! command -v ssh-keygen &> /dev/null; then
+                if [ -f /etc/debian_version ]; then
+                    sudo apt-get update && sudo apt-get install -y openssh-client
+                elif [ -f /etc/fedora-release ]; then
+                    sudo dnf install -y openssh-clients
+                else
+                    fail "OpenSSH client not found. Please install it manually."
+                fi
+            fi
+            ;;
+    esac
 }
 
 # 3. Verify FIDO2 PIN
 verify_pin() {
     info "Your YubiKey needs a FIDO2 PIN to create a security key."
     warn "If you have not set a PIN yet, you must do so now."
-    if [ "$YKMAN_INSTALLED" = true ]; then
-        info "You can set one now by running: ${YELLOW}ykman fido access change-pin${NC}"
-    else
-        info "Please use the YubiKey Manager GUI to set a FIDO2 PIN under Applications > FIDO2."
-    fi
+    info "You can set one by running: ${YELLOW}ykman fido access change-pin${NC}"
     read -p "Have you set a FIDO2 PIN on your YubiKey? (y/N): " confirm
-    if [[ "$confirm" != "y" ]]; then
+    if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
         fail "PIN setup aborted. Please set a PIN and re-run the script."
     fi
 }
@@ -85,19 +88,17 @@ verify_pin() {
 generate_ssh_key() {
     info "Generating a new hardware-backed SSH key..."
     
-    # Define key path
     KEY_PATH="$HOME/.ssh/id_ed25519_sk_github"
     if [ -f "$KEY_PATH" ]; then
         warn "Key file already exists at $KEY_PATH."
         read -p "Do you want to overwrite it? (y/N): " overwrite_confirm
-        if [[ "$overwrite_confirm" != "y" ]]; then
+        if [[ ! "$overwrite_confirm" =~ ^[yY](es)?$ ]]; then
             fail "Key generation aborted."
         fi
         rm -f "${KEY_PATH}" "${KEY_PATH}.pub"
     fi
 
     info "When prompted, you will need to touch your flashing YubiKey."
-    # Generate the key. -O resident makes the key portable.
     ssh-keygen -t ed25519-sk -f "$KEY_PATH" -O resident -O application=ssh:github -O verify-required -C "github-$(whoami)@$(hostname)"
     
     success "SSH key generated successfully at ${KEY_PATH}"
@@ -106,21 +107,25 @@ generate_ssh_key() {
 # 5. Configure SSH Agent
 configure_ssh_agent() {
     info "Configuring the SSH agent..."
-    # Ensure ssh-agent is running
-    eval "$(ssh-agent -s)" > /dev/null
 
     # Add key to agent
     if [[ "$OS" == "macOS" ]]; then
-        # Store passphrase in macOS Keychain
-        ssh-add --apple-use-keychain "$KEY_PATH"
+        # FIX: Explicitly use the Homebrew-installed ssh-agent and ssh-add to avoid path issues.
+        local brew_prefix
+        brew_prefix=$(brew --prefix)
+        info "Using Homebrew OpenSSH binaries from $brew_prefix"
+        
+        eval "$(${brew_prefix}/bin/ssh-agent -s)" > /dev/null
+        ssh-add "$KEY_PATH"
     else
+        eval "$(ssh-agent -s)" > /dev/null
         ssh-add "$KEY_PATH"
     fi
     success "Key added to the SSH agent."
 
-    # Configure ~/.ssh/config
     CONFIG_PATH="$HOME/.ssh/config"
     info "Updating SSH config at ${CONFIG_PATH}..."
+    mkdir -p "$(dirname "$CONFIG_PATH")"
     {
         echo ""
         echo "# YubiKey SSH configuration for GitHub (added by script)"
@@ -144,15 +149,14 @@ display_public_key() {
 # --- Main Execution ---
 main() {
     detect_os
-    check_dependencies
+    install_dependencies
     verify_pin
     generate_ssh_key
     configure_ssh_agent
     display_public_key
 
-    # Final test
     read -p "Do you want to test the connection to GitHub now? (y/N): " test_conn
-    if [[ "$test_conn" == "y" ]]; then
+    if [[ "$test_conn" =~ ^[yY](es)?$ ]]; then
         info "Attempting to authenticate. Touch your YubiKey when it flashes."
         ssh -T git@github.com
     fi
@@ -161,3 +165,4 @@ main() {
 }
 
 main
+

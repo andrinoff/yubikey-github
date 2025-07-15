@@ -11,7 +11,6 @@
 set -eo pipefail # Exit on error
 
 # --- Helper Functions ---
-# Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -48,29 +47,9 @@ detect_os() {
     success "Detected OS: $OS"
 }
 
-# 2. Check for Dependencies
-check_dependencies() {
-    info "Checking for required dependencies..."
-    
-    # Check for GnuPG
-    if ! command -v gpg &> /dev/null; then
-        warn "GnuPG (gpg) is not installed."
-        install_dependencies
-    else
-        success "GnuPG is installed."
-    fi
-
-    # Check for Git
-    if ! command -v git &> /dev/null; then
-        fail "Git is not installed. Please install Git and re-run the script."
-    else
-        success "Git is installed."
-    fi
-}
-
-# 3. Install Dependencies
+# 2. Install Dependencies
 install_dependencies() {
-    info "Attempting to install missing dependencies..."
+    info "Checking and installing dependencies..."
     case $OS in
         'macOS')
             if ! command -v brew &> /dev/null; then
@@ -78,84 +57,73 @@ install_dependencies() {
             fi
             info "Installing GnuPG, pinentry-mac, and yubikey-personalization via Homebrew..."
             brew install gnupg pinentry-mac yubikey-personalization
-            echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" >> ~/.gnupg/gpg-agent.conf
-            success "Dependencies installed."
+            
+            # FIX: Ensure .gnupg directory exists before writing to it
+            info "Configuring gpg-agent..."
+            mkdir -p ~/.gnupg
+            echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" > ~/.gnupg/gpg-agent.conf
+            
+            success "Dependencies installed and configured."
             ;;
         'Linux')
-            if [ -f /etc/debian_version ]; then
-                info "Installing dependencies for Debian/Ubuntu..."
-                sudo apt-get update && sudo apt-get install -y gnupg2 pcscd scdaemon
-            elif [ -f /etc/fedora-release ]; then
-                info "Installing dependencies for Fedora..."
-                sudo dnf install -y gnupg2 pcscd
-            else
-                fail "Unsupported Linux distribution. Please install GnuPG manually."
+            if ! command -v gpg &> /dev/null; then
+                 if [ -f /etc/debian_version ]; then
+                    info "Installing dependencies for Debian/Ubuntu..."
+                    sudo apt-get update && sudo apt-get install -y gnupg2 pcscd scdaemon
+                elif [ -f /etc/fedora-release ]; then
+                    info "Installing dependencies for Fedora..."
+                    sudo dnf install -y gnupg2 pcscd
+                else
+                    fail "Unsupported Linux distribution. Please install GnuPG manually."
+                fi
+                success "Dependencies installed."
             fi
-            success "Dependencies installed."
             ;;
     esac
-    # Reload gpg-agent
+    # Reload gpg-agent to apply changes
     gpg-connect-agent reloadagent /bye &>/dev/null || true
 }
 
-# 4. YubiKey GPG Setup
+# 3. YubiKey GPG Setup
 setup_yubikey_gpg() {
     info "Starting YubiKey GPG setup..."
     
-    # Check for YubiKey
     if ! gpg --card-status &> /dev/null; then
         fail "No YubiKey detected. Please insert your YubiKey and ensure GPG can access it."
     fi
     success "YubiKey detected."
 
-    # Generate GPG key on YubiKey
-    info "This script will now generate a new GPG key on your YubiKey."
-    warn "This will overwrite any existing GPG key on the device."
+    warn "This script will generate a new GPG key on your YubiKey, overwriting any existing one."
     read -p "Do you want to continue? (y/N): " confirm
-    if [[ "$confirm" != "y" ]]; then
+    if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
         fail "GPG setup aborted."
     fi
 
-    # Get user details
     read -p "Enter your full name: " name
-    read -p "Enter your email address: " email
+    read -p "Enter your email address (must match your GitHub email): " email
 
-    # Generate key
-    gpg --batch --passphrase '' --quick-generate-key "$name <$email>" default default
+    # Use gpg's --generate-key in batch mode for simplicity
+    info "Generating GPG key. You will be prompted for your YubiKey Admin PIN and to touch the device."
+    gpg --expert --full-generate-key
+    
     GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG "$email" | grep sec | awk '{print $2}' | cut -d'/' -f2)
+    if [ -z "$GPG_KEY_ID" ]; then
+        fail "Could not determine GPG Key ID. Please ensure the email matches."
+    fi
     success "GPG key generated with ID: $GPG_KEY_ID"
 
-    # Move key to YubiKey
-    info "Moving the generated key to your YubiKey..."
+    info "Moving key stubs to the YubiKey..."
     gpg --edit-key "$GPG_KEY_ID" <<EOF
 keytocard
-y
 1
-y
 2
-y
 3
-y
 save
 EOF
     success "GPG key moved to YubiKey."
-    
-    # Set touch policy
-    info "Setting touch policy for signatures..."
-    gpg --card-edit <<EOF
-admin
-key 1
-y
-key 2
-n
-key 3
-n
-quit
-EOF
-    success "Touch policy set."
 }
 
-# 5. Configure Git
+# 4. Configure Git
 configure_git() {
     info "Configuring Git for GPG signing..."
     git config --global user.signingkey "$GPG_KEY_ID"
@@ -166,7 +134,7 @@ configure_git() {
     success "Git configured to use GPG key $GPG_KEY_ID for signing."
 }
 
-# 6. Export GPG Key for GitHub
+# 5. Export GPG Key for GitHub
 export_gpg_key() {
     info "Exporting GPG public key for GitHub..."
     GPG_PUBLIC_KEY=$(gpg --armor --export "$GPG_KEY_ID")
@@ -182,7 +150,7 @@ export_gpg_key() {
 # --- Main Execution ---
 main() {
     detect_os
-    check_dependencies
+    install_dependencies
     setup_yubikey_gpg
     configure_git
     export_gpg_key
@@ -191,3 +159,4 @@ main() {
 }
 
 main
+
